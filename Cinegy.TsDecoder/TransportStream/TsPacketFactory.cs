@@ -18,6 +18,8 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
+using System.Linq;
+using System.Xml.Linq;
 
 namespace Cinegy.TsDecoder.TransportStream
 {
@@ -291,7 +293,11 @@ namespace Cinegy.TsDecoder.TransportStream
                         //if a packet has a payload start, check for a PES start-code and then map some key fields into a PesHdr struct for quick / easy access
                         if (tsPacket is { ContainsPayload: true, PayloadUnitStartIndicator: true })
                         {
-                            if (payloadOffs < dataSize - 1 && data[payloadOffs] == 0 && data[payloadOffs + 1] == 0 && data[payloadOffs + 2] == 1)
+                            // Add debugging information for troubleshooting
+                            Debug.WriteLine($"Checking PES at payloadOffs: {payloadOffs}, bytes: {string.Join(" ", data.Skip(payloadOffs).Take(10).Select(b => b.ToString("X2")))}");
+                            
+                            // Validate PES header structure before parsing
+                            if (IsValidPesHeader(data, payloadOffs, dataSize))
                             {
                                 tsPacket.PesHeader = new PesHdr
                                 {
@@ -306,22 +312,63 @@ namespace Cinegy.TsDecoder.TransportStream
                                 //check to see if this is the kind of PES that has the more advanced flags and fields (like PTS / DTS)
                                 if (!Pes.SimplePesTypes.Contains((PesStreamTypes)tsPacket.PesHeader.StreamId))
                                 {
+                                    // Ensure we have enough data for PES header fields
+                                    if (payloadOffs + 8 >= dataSize) continue;
+                                    
+                                    // Validate PES header structure before parsing timestamps
+                                    var pesFlags = data[payloadOffs + 6];
                                     var ptsDtsFlag = data[payloadOffs + 7] >> 6;
+                                    var pesHeaderDataLength = data[payloadOffs + 8];
 
-                                    tsPacket.PesHeader.HeaderLength = (byte)(3 + data[payloadOffs + 8]);
+                                    // Validate PES header - must have the '10' pattern in the first two bits
+                                    if ((pesFlags & 0xC0) != 0x80)
+                                    {
+                                        Debug.WriteLine($"Invalid PES header flags at offset {payloadOffs + 6}: 0x{pesFlags:X2}");
+                                        continue;
+                                    }
+
+                                    // Ensure we have enough data for the complete PES header
+                                    if (payloadOffs + 9 + pesHeaderDataLength >= dataSize) continue;
+
+                                    // Validate header data length is reasonable
+                                    if (pesHeaderDataLength > 255)
+                                    {
+                                        Debug.WriteLine($"Invalid PES header data length: {pesHeaderDataLength}");
+                                        continue;
+                                    }
+
+                                    tsPacket.PesHeader.HeaderLength = (byte)(3 + pesHeaderDataLength);
 
                                     switch (ptsDtsFlag)
                                     {
                                         case 2:
-                                            tsPacket.PesHeader.Pts = Get_TimeStamp(2, data, payloadOffs + 9);
+                                            // PTS only - check if we have enough data for 5-byte timestamp
+                                            if (payloadOffs + 13 < dataSize && pesHeaderDataLength >= 5)
+                                            {
+                                                var pts = Get_TimeStamp(2, data, payloadOffs + 9);
+                                                if (pts != -1)
+                                                {
+                                                    tsPacket.PesHeader.Pts = pts;
+                                                }
+                                            }
                                             break;
                                         case 3:
-                                            tsPacket.PesHeader.Pts = Get_TimeStamp(3, data, payloadOffs + 9);
-                                            tsPacket.PesHeader.Dts = Get_TimeStamp(1, data, payloadOffs + 14);
+                                            // Both PTS and DTS - check if we have enough data for both 5-byte timestamps
+                                            if (payloadOffs + 18 < dataSize && pesHeaderDataLength >= 10)
+                                            {
+                                                var pts = Get_TimeStamp(3, data, payloadOffs + 9);
+                                                var dts = Get_TimeStamp(1, data, payloadOffs + 14);
+                                                if (pts != -1) tsPacket.PesHeader.Pts = pts;
+                                                if (dts != -1) tsPacket.PesHeader.Dts = dts;
+                                            }
                                             break;
                                         case 1:
                                             //forbidden value - this has gone very wrong, and we should not trust any of the data sample we have...
+                                            Debug.WriteLine($"Forbidden PTS/DTS flag value (1) at offset {payloadOffs + 7}");
                                             return Flush(data, dataSize, rentedDataArray);
+                                        case 0:
+                                            // No PTS or DTS present
+                                            break;
                                     }
                                 }
                             }
@@ -431,6 +478,32 @@ namespace Cinegy.TsDecoder.TransportStream
             return data;
         }
 
+        private static bool IsValidPesHeader(IList<byte> data, int offset, int dataSize)
+        {
+            // Need at least 9 bytes for minimum PES header
+            if (offset + 8 >= dataSize) return false;
+            
+            // Check PES start code
+            if (data[offset] != 0x00 || data[offset + 1] != 0x00 || data[offset + 2] != 0x01) return false;
+            
+            // Check stream ID is valid
+            var streamId = data[offset + 3];
+            if (streamId == 0x00) return false; // Reserved
+            
+            // Check PES header flags - should have '10' pattern in first two bits
+            var pesFlags = data[offset + 6];
+            if ((pesFlags & 0xC0) != 0x80) return false;
+            
+            // Check PES header data length is reasonable
+            var headerDataLength = data[offset + 8];
+            if (headerDataLength > 255) return false;
+            
+            // Ensure we have enough data for the claimed header length
+            if (offset + 9 + headerDataLength >= dataSize) return false;
+            
+            return true;
+        }
+
         private static long Get_TimeStamp(int code, IList<byte> data, int offs)
         {
             if (data == null) throw new ArgumentNullException(nameof(data));
@@ -438,20 +511,42 @@ namespace Cinegy.TsDecoder.TransportStream
             if (code == 0)
             {
                 Debug.WriteLine("Method has been called with incorrect code to match against - check for fault in calling method.");
-                throw new Exception("PES Syntax error: 0 value timestamp code check passed in");
+                return -1; // Return invalid timestamp instead of throwing
             }
 
-            if (data[offs + 0] >> 4 != code)
-                throw new Exception("PES Syntax error: Wrong timestamp code");
+            // Ensure we have enough data for the 5-byte timestamp
+            if (offs + 4 >= data.Count)
+            {
+                Debug.WriteLine($"PES Syntax error: Not enough data for timestamp at offset {offs}, data length {data.Count}");
+                return -1; // Return invalid timestamp instead of throwing
+            }
+
+            var actualCode = data[offs + 0] >> 4;
+            if (actualCode != code)
+            {
+                var contextBytes = string.Join(" ", data.Skip(Math.Max(0, offs - 5)).Take(15).Select(b => b.ToString("X2")));
+                Debug.WriteLine($"PES Syntax warning: Expected timestamp code {code}, got {actualCode} at offset {offs}");
+                Debug.WriteLine($"Context bytes: {contextBytes}");
+                return -1; // Return invalid timestamp instead of throwing
+            }
 
             if ((data[offs + 0] & 1) != 1)
-                throw new Exception("PES Syntax error: Invalid timestamp marker bit");
+            {
+                Debug.WriteLine($"PES Syntax warning: Invalid timestamp marker bit at offset {offs}");
+                return -1; // Return invalid timestamp instead of throwing
+            }
 
             if ((data[offs + 2] & 1) != 1)
-                throw new Exception("PES Syntax error: Invalid timestamp marker bit");
+            {
+                Debug.WriteLine($"PES Syntax warning: Invalid timestamp marker bit at offset {offs + 2}");
+                return -1; // Return invalid timestamp instead of throwing
+            }
 
             if ((data[offs + 4] & 1) != 1)
-                throw new Exception("PES Syntax error: Invalid timestamp marker bit");
+            {
+                Debug.WriteLine($"PES Syntax warning: Invalid timestamp marker bit at offset {offs + 4}");
+                return -1; // Return invalid timestamp instead of throwing
+            }
 
             long a = (data[offs + 0] >> 1) & 7;
             long b = (data[offs + 1] << 7) | (data[offs + 2] >> 1);
