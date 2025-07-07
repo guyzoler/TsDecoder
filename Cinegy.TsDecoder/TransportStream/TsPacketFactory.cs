@@ -294,7 +294,7 @@ namespace Cinegy.TsDecoder.TransportStream
                         if (tsPacket is { ContainsPayload: true, PayloadUnitStartIndicator: true })
                         {
                             // Add debugging information for troubleshooting
-                            Debug.WriteLine($"Checking PES at payloadOffs: {payloadOffs}, bytes: {string.Join(" ", data.Skip(payloadOffs).Take(10).Select(b => b.ToString("X2")))}");
+                            //Debug.WriteLine($"Checking PES at payloadOffs: {payloadOffs}, bytes: {string.Join(" ", data.Skip(payloadOffs).Take(10).Select(b => b.ToString("X2")))}");
                             
                             // Validate PES header structure before parsing
                             if (IsValidPesHeader(data, payloadOffs, dataSize))
@@ -510,14 +510,14 @@ namespace Cinegy.TsDecoder.TransportStream
 
             if (code == 0)
             {
-                Debug.WriteLine("Method has been called with incorrect code to match against - check for fault in calling method.");
+                //Debug.WriteLine("Method has been called with incorrect code to match against - check for fault in calling method.");
                 return -1; // Return invalid timestamp instead of throwing
             }
 
             // Ensure we have enough data for the 5-byte timestamp
             if (offs + 4 >= data.Count)
             {
-                Debug.WriteLine($"PES Syntax error: Not enough data for timestamp at offset {offs}, data length {data.Count}");
+                //Debug.WriteLine($"PES Syntax error: Not enough data for timestamp at offset {offs}, data length {data.Count}");
                 return -1; // Return invalid timestamp instead of throwing
             }
 
@@ -525,26 +525,26 @@ namespace Cinegy.TsDecoder.TransportStream
             if (actualCode != code)
             {
                 var contextBytes = string.Join(" ", data.Skip(Math.Max(0, offs - 5)).Take(15).Select(b => b.ToString("X2")));
-                Debug.WriteLine($"PES Syntax warning: Expected timestamp code {code}, got {actualCode} at offset {offs}");
-                Debug.WriteLine($"Context bytes: {contextBytes}");
+                //Debug.WriteLine($"PES Syntax warning: Expected timestamp code {code}, got {actualCode} at offset {offs}");
+                //Debug.WriteLine($"Context bytes: {contextBytes}");
                 return -1; // Return invalid timestamp instead of throwing
             }
 
             if ((data[offs + 0] & 1) != 1)
             {
-                Debug.WriteLine($"PES Syntax warning: Invalid timestamp marker bit at offset {offs}");
+                //Debug.WriteLine($"PES Syntax warning: Invalid timestamp marker bit at offset {offs}");
                 return -1; // Return invalid timestamp instead of throwing
             }
 
             if ((data[offs + 2] & 1) != 1)
             {
-                Debug.WriteLine($"PES Syntax warning: Invalid timestamp marker bit at offset {offs + 2}");
+                //Debug.WriteLine($"PES Syntax warning: Invalid timestamp marker bit at offset {offs + 2}");
                 return -1; // Return invalid timestamp instead of throwing
             }
 
             if ((data[offs + 4] & 1) != 1)
             {
-                Debug.WriteLine($"PES Syntax warning: Invalid timestamp marker bit at offset {offs + 4}");
+                //Debug.WriteLine($"PES Syntax warning: Invalid timestamp marker bit at offset {offs + 4}");
                 return -1; // Return invalid timestamp instead of throwing
             }
 
