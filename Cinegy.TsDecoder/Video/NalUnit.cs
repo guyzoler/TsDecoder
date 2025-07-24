@@ -13,7 +13,8 @@
   limitations under the License.
 */
 
-using System.Text.Json.Serialization;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Serialization;
 
 namespace Cinegy.TsDecoder.Video;
 
